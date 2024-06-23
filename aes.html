@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title></title>
+</head>
+<body>
+
+<script>
+async function encrypt(text, password) {
+    // Generate random salt
+    const salt = crypto.getRandomValues(new Uint8Array(8));
+
+    // Derive key material using PBKDF2 with SHA-1
+    const keyMaterial = await crypto.subtle.importKey(
+        'raw', 
+        (new TextEncoder()).encode(password), 
+        { name: 'PBKDF2' }, 
+        false, 
+        ['deriveBits']
+    );
+
+    // Derive 48 bytes (384 bits) from the key material, to be split into the key and IV
+    const derivedBits = await crypto.subtle.deriveBits(
+        {
+            name: 'PBKDF2',
+            salt: salt,
+            iterations: 10000,
+            hash: 'SHA-1'
+        },
+        keyMaterial,
+        384 // 256 bits for key + 128 bits for IV = 384 bits
+    );
+
+    // Split the derived bits into key and IV
+    const keyBytes = derivedBits.slice(0, 32); // 32 bytes (256 bits) for key
+    const ivBytes = derivedBits.slice(32);     // 16 bytes (128 bits) for IV
+
+    // Import the key for AES-CBC
+    const key = await crypto.subtle.importKey(
+        'raw',
+        keyBytes,
+        { name: 'AES-CBC' },
+        false,
+        ['encrypt']
+    );
+
+    // Encrypt the text
+    const encodedText = (new TextEncoder()).encode(text);
+    const encryptedBuffer = await crypto.subtle.encrypt(
+        {
+            name: 'AES-CBC',
+            iv: ivBytes
+        },
+        key,
+        encodedText
+    );
+
+    // Combine salt, and encrypted text
+    const textEncoder = new TextEncoder();
+    const prefix = textEncoder.encode("Salted__");
+
+    const combinedBuffer = new Uint8Array(prefix.length + salt.length  + encryptedBuffer.byteLength);
+    combinedBuffer.set(prefix, 0);
+    combinedBuffer.set(salt, prefix.length);
+    combinedBuffer.set(new Uint8Array(encryptedBuffer), prefix.length + salt.length);
+
+    // Convert to Base64
+    const base64String = btoa(String.fromCharCode(...combinedBuffer));
+    return base64String;
+}
+
+async function decrypt(encrypted, password) {
+    // Decode the Base64 string
+    const combinedBuffer = Uint8Array.from(atob(encrypted), c => c.charCodeAt(0));
+    
+    // Verify the prefix to match "Salted__"
+    const textDecoder = new TextDecoder();
+    const prefix = textDecoder.decode(combinedBuffer.slice(0, 8));
+    
+    if (prefix !== "Salted__") {
+        throw new Error("Invalid encrypted data");
+    }
+
+    // Extract the salt
+    const salt = combinedBuffer.slice(8, 16);
+
+    // Derive key material using PBKDF2 with SHA-1
+    const keyMaterial = await crypto.subtle.importKey(
+        'raw', 
+        (new TextEncoder()).encode(password), 
+        { name: 'PBKDF2' }, 
+        false, 
+        ['deriveBits']
+    );
+
+    // Derive 48 bytes (384 bits) from the key material to be split for key and IV
+    const derivedBits = await crypto.subtle.deriveBits(
+        {
+            name: 'PBKDF2',
+            salt: salt,
+            iterations: 10000,
+            hash: 'SHA-1'
+        },
+        keyMaterial,
+        384 // 256 bits for key + 128 bits for IV = 384 bits
+    );
+
+    // Split the derived bits into key and IV
+    const keyBytes = derivedBits.slice(0, 32); // 32 bytes (256 bits) for key
+    const ivBytes = derivedBits.slice(32);     // 16 bytes (128 bits) for IV
+
+    // Import the key for AES-CBC
+    const key = await crypto.subtle.importKey(
+        'raw',
+        keyBytes,
+        { name: 'AES-CBC' },
+        false,
+        ['decrypt']
+    );
+
+    // Extract the encrypted data
+    const encryptedData = combinedBuffer.slice(16); // After "Salted__" (8 bytes) and salt (8 bytes)
+
+    // Decrypt the data
+    const decryptedBuffer = await crypto.subtle.decrypt(
+        {
+            name: 'AES-CBC',
+            iv: ivBytes
+        },
+        key,
+        encryptedData
+    );
+
+    // Decode the decrypted bytes into text
+    const decodedText = textDecoder.decode(decryptedBuffer);
+    
+    return decodedText;
+}
+
+async function handleEncryptionKeypress() {
+    const password = document.getElementById('password').value;
+    const text = document.getElementById('encryptInput').value;
+    if (password && text) {
+        const encrypted = await encrypt(text, password);
+        document.getElementById('encryptedText').innerText = encrypted;
+    }
+}
+
+async function handleDecryptionKeypress() {
+    const password = document.getElementById('password').value;
+    const encryptedText = document.getElementById('decryptedInput').value;
+    if (password && encryptedText) {
+
+        decrypt(encryptedText, password).then(decrypted => {
+            document.getElementById('decryptedText').innerText = decrypted;
+        }).catch(error => {
+            document.getElementById('decryptedText').innerText = "Failed to decrypt.";
+        });
+    } else {
+        document.getElementById('decryptedText').innerText = "";
+    }
+}
+
+</script>
+
+<body>
+<h1>Local browser AES and PBKDF2</h1>
+
+<label for="password">Password:</label>
+<input type="password" id="password" onkeyup="handleEncryptionKeypress();handleDecryptionKeypress();">
+
+<h2>Encryption</h2>
+Input:<br/>
+<textarea id="encryptInput" rows="5" cols="50" onkeyup="handleEncryptionKeypress(event)"></textarea><br/>
+Output:<br/>
+<textarea id="encryptedText" rows="5" cols="50" style="background-color: lightgray" readonly></textarea>
+
+<h2>Decryption</h2>
+Input:<br/>
+<textarea id="decryptedInput" rows="5" cols="50" onkeyup="handleDecryptionKeypress(event)"></textarea><br/>
+Output:<br/>
+<textarea id="decryptedText" rows="5" cols="50" style="background-color: lightgray" readonly></textarea>
+
+<h1>OpenSSL command line equivalent</h1>
+<p>The above is the same as and compatible with the following commands:</p>
+<pre>
+# Encrypt (it will prompt for password)
+echo "hello world" | openssl enc -e -aes-256-cbc -md sha1 -pbkdf2 -salt -a
+
+# Decrypt (it will prompt for password)
+echo "U2FsdGVkX1/aOPQTvaPUehTlzr6aNMs/wUhUfqJgqwk=" | openssl enc -d -aes-256-cbc -md sha1 -pbkdf2 -salt -a
+</pre>
+
+</body>
+</html>
